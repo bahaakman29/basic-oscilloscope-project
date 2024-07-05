@@ -1,0 +1,96 @@
+#include <msp430.h>
+#include <stdio.h>
+
+#define ANALOG_INPUT_BIT BIT5 // Analog sinyal girisi için P1.5 pinini kullaniyoruz
+#define BAUDRATE 9600 // UART iletisim hizi
+
+void bekle(long sure) {
+    while (sure--);
+}
+
+void initUART() {
+    // UART için ayarlar
+    P1SEL |= BIT1 + BIT2; // P1.1 ve P1.2'yi UART için seç
+    P1SEL2 |= BIT1 + BIT2;
+    UCA0CTL1 |= UCSSEL_2; // SMCLK'yi UART için kullan
+    UCA0BR0 = 104; // 1MHz SMCLK ve 9600 baudrate için ayarlar
+    UCA0BR1 = 0;
+    UCA0MCTL = UCBRS0; // Modülasyon ayarlari
+    UCA0CTL1 &= ~UCSWRST; // UART'i etkinlestir
+}
+
+void initADC() {
+    ADC10CTL1 = INCH_5 + ADC10DIV_7; // P1.5 (A5) girisini seç, ADC10CLK / 4 bölücü
+    ADC10CTL0 = SREF_0 + ADC10SHT_3 + ADC10ON + ADC10IE; // VCC ve GND arasindaki gerilimi referans al, 64 ADC10CLK örnekleme süresi
+    ADC10AE0 |= ANALOG_INPUT_BIT; // Analog girisi etkinlestir
+}
+
+float convertToVoltage(unsigned int adcValue, float vcc) {
+    float voltage = (vcc / 1024.0) * adcValue; // ADC degerini gerilime dönüstür
+    return voltage;
+}
+
+void sendData(unsigned char data) {
+    while (!(IFG2 & UCA0TXIFG)); // TX tamamlandi mi kontrol et
+    UCA0TXBUF = data; // Veriyi gönder
+}
+
+void sendString(char *str) {
+    while (*str != '\0') {
+        sendData(*str++);
+        bekle(100);
+    }
+}
+
+void sendInteger(int num) {
+    char buffer[6]; // Integer degerini tutacak bir degisken olustur
+    int i = 0;
+
+    // Integer degerini ASCII karakterlerine dönüstür
+    do {
+        buffer[i++] = num % 10 + '0'; // Son basamagi al ve ASCII karakterine dönüstür
+        num /= 10; // Son basamagi atla
+    } while (num != 0);
+
+    // Ters siradaki karakterleri UART üzerinden gönder
+    while (--i >= 0) {
+        sendData(buffer[i]);
+    }
+}
+
+int main(void) {
+    WDTCTL = WDTPW + WDTHOLD; // Watchdog timer'i devre disi birak
+
+    // DCO ayarlari
+    DCOCTL = CALDCO_1MHZ;
+    BCSCTL1 = CALBC1_1MHZ;
+    BCSCTL2 |= DIVM_1;
+
+
+    initUART(); // UART'i baslat
+    initADC(); // ADC'yi baslat
+
+    __bis_SR_register(GIE); // Genel kesmeleri etkinlestir
+
+    float vcc = 3.3; // Örnegin, VCC gerilimi 3.3V olsun
+
+    while (1) {
+        ADC10CTL0 |= ENC + ADC10SC; // ADC'yi baslat
+        __bis_SR_register(CPUOFF + GIE); // ADC kesmesini bekle, CPU'yu uykuya al
+
+        unsigned int analogValue = ADC10MEM; // Okunan analog degeri al
+
+        // ADC çikisini gerilime dönüstür
+        float analogVoltage = convertToVoltage(analogValue, vcc);
+
+        // Gerilimi UART üzerinden gönder
+        sendString("Analog Gerilim: ");
+        sendInteger((int)(analogVoltage * 1000)); // mV cinsinden gerilim göndermek izçin 1000 ile çarpiyoruz
+        sendString(" mV\n");
+    }
+}
+
+#pragma vector=ADC10_VECTOR
+__interrupt void ADC10_ISR(void) {
+    __bic_SR_register_on_exit(CPUOFF); // CPU'yu uykudan uyandir
+}
